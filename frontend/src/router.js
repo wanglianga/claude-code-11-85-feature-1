@@ -13,6 +13,7 @@ const routes = [
       { path: 'explorer', component: () => import('./pages/Explorer.vue'), meta: { title: '受限图扩展' } },
       { path: 'patterns', component: () => import('./pages/Patterns.vue'), meta: { title: '模式与排序' } },
       { path: 'counter', component: () => import('./pages/Counter.vue'), meta: { title: '反证联查' } },
+      { path: 'logistics', component: () => import('./pages/Logistics.vue'), meta: { title: '配送与库存守恒' } },
       { path: 'cases', component: () => import('./pages/Cases.vue'), meta: { title: '案件投影' } },
       { path: 'cases/:code', component: () => import('./pages/CaseDetail.vue'), meta: { title: '案件详情' } },
       { path: 'snapshots', component: () => import('./pages/Snapshots.vue'), meta: { title: '快照复演' } }

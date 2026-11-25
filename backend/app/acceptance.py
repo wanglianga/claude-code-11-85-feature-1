@@ -87,22 +87,32 @@ def run_acceptance(db: Session) -> dict:
          "schedule": facts["schedule_conflict"]["passed"],
          "missing_uids": missing, "chain": chain1}))
 
-    # 4) 规则与图模型同链 + 同目标排序 P1 居首 ------------------------------
+    # 4) 规则与图模型同链 + 同目标排序（基线网络 P1 居首；物流案 C-009 因多渠道未排除获更高优先级）
     mr1 = j1.model_result or {}
     same_chain = mr1.get("trace_chain_uids") == chain1
+    baseline_codes = {f"C-00{i}" for i in range(1, 9)}  # 原 8 案基线网络
     open_rows = [r for r in rank_cases(db, "MULTI_POINT", "model")
                  if r["status"] in ("pending", "reviewing", "new")]
     rule_rows = [r for r in rank_cases(db, "MULTI_POINT", "amount_completeness")
                  if r["status"] in ("pending", "reviewing", "new")]
+    base_model = [r for r in open_rows if r["code"] in baseline_codes]
+    base_rule = [r for r in rule_rows if r["code"] in baseline_codes]
     top_model = open_rows[0]["code"] if open_rows else None
     top_rule = rule_rows[0]["code"] if rule_rows else None
+    c9_row = next((r for r in open_rows if r["code"] == "C-009"), None)
+    rank_ok = (base_model and base_model[0]["code"] == "C-001"
+               and base_rule and base_rule[0]["code"] == "C-001"
+               and c9_row and (c9_row["model_score"] or 0) >= (mr1.get("calibrated_score") or 0))
     checks.append(_chk(
-        "same_chain_and_rank", "规则与图模型在 P1 上展示相同支持链，且同目标排序居首",
-        same_chain and top_model == "C-001" and top_rule == "C-001"
-        and (mr1.get("calibrated_score") or 0) >= 55,
-        "trace_chain_uids == support_chain；两种排序开放线索第一均为 C-001；模型分≥55",
-        {"same_chain": same_chain, "top_model": top_model, "top_rule": top_rule,
-         "model_score": mr1.get("calibrated_score"),
+        "same_chain_and_rank", "规则与图模型在 P1 上展示相同支持链；基线网络 P1 居首，C-009 因物流未排除获最高模型优先级",
+        same_chain and rank_ok and (mr1.get("calibrated_score") or 0) >= 55,
+        "trace_chain_uids == support_chain；C-001 为基线 8 案第一；C-009 模型分≥C-001 且保持待核",
+        {"same_chain": same_chain,
+         "top_model_overall": top_model, "top_rule_overall": top_rule,
+         "baseline_model_top": base_model[0]["code"] if base_model else None,
+         "baseline_rule_top": base_rule[0]["code"] if base_rule else None,
+         "c009_model_score": c9_row["model_score"] if c9_row else None,
+         "c001_model_score": mr1.get("calibrated_score"),
          "rule_score": j1.rule_result.get("raw_score")}))
 
     # 5) P2/P3 弱身份：只给待核边，不扩展 --------------------------------
@@ -201,6 +211,92 @@ def run_acceptance(db: Session) -> dict:
          "policies": len(snap1.policy_versions) if snap1 else 0,
          "judgment_version": j1.version, "snapshot_no": j1.snapshot_no}))
 
+    # 11~13) 配送解释/库存守恒专项
+    run_logistics_acceptance(db, checks)
+
     passed = sum(1 for c in checks if c["passed"])
     return {"overall": passed == len(checks), "passed": passed,
             "total": len(checks), "checks": checks}
+
+
+def run_logistics_acceptance(db: Session, checks: list):
+    """配送解释/库存守恒专项断言（五件套）。"""
+    from .models import LogisticsAnalysis, LogisticsFinding
+
+    def latest(code):
+        return db.query(LogisticsAnalysis).filter_by(case_code=code) \
+            .order_by(LogisticsAnalysis.version.desc()).first()
+
+    # 11) C-009：配送量超库存 → cannot_explain，缺货入案件包且案件不被自动定性
+    c9 = db.query(Case).filter_by(code="C-009").first()
+    a9 = latest("C-009")
+    d9 = a9.detail if a9 else {}
+    cons9 = d9.get("conservation", {})
+    over_codes = {x["supply"] for x in cons9.get("over_stock", [])}
+    open_findings = db.query(LogisticsFinding).filter_by(case_code="C-009").all()
+    open_codes = {f.code for f in open_findings if f.status == "open"}
+    auto_untouched = c9.status == "reviewing"  # 分析与案件包不改案件定性
+    ok9 = (a9 and a9.overall_status == "cannot_explain"
+           and a9.explanation_capable is False
+           and "SUP-N3" in over_codes
+           and any(x["pharmacy"] == "PH6" and x["date"] == "2026-03-10"
+                   and x["balance"] < 0 for x in cons9.get("negative_balance_days", []))
+           and len(open_codes) >= 3 and auto_untouched)
+    checks.append(_chk(
+        "logistics_over_stock",
+        "C-009：配送量超同批次库存不能作正常解释，负库存/缺货入案件包且不自动定性",
+        ok9,
+        "cannot_explain；SUP-N3 超库存；存在负库存日；案件包 open；案件状态仍 reviewing",
+        {"status": a9.overall_status if a9 else None,
+         "over_stock": sorted(over_codes),
+         "negative_days": cons9.get("negative_balance_days"),
+         "finding_codes": sorted(open_codes), "case_status": c9.status,
+         "coverage_interval": cons9.get("coverage_interval")}))
+
+    # 12) 重复签收照片不独立加分 + 时序倒挂被捕获
+    sig9 = d9.get("signature_quality", {})
+    dup = {g["photo_hash"]: g["deliveries"] for g in sig9.get("duplicate_photo_groups", [])}
+    dup_weights = {i["delivery"]: i["evidence_weight"]
+                   for i in sig9.get("items", []) if i["delivery"] in ("DL-N1", "DL-N2")}
+    tl9 = d9.get("timeline", {})
+    tl_types = {v["type"] for v in tl9.get("violations", [])}
+    ok12 = (dup.get("PHOTO-DUP-7777") == ["DL-N1", "DL-N2"]
+            and dup_weights == {"DL-N1": 1.0, "DL-N2": 0.0}
+            and sig9.get("independent_evidence") == 2
+            and "sign_before_supply" in tl_types)
+    checks.append(_chk(
+        "logistics_photo_timeline",
+        "重复签收照片只计一次独立证据（不独立加分），签收早于出库的时序倒挂被捕获",
+        ok12,
+        "DL-N2 复用照片权重 0；独立证据 2/4；sign_before_supply 入违规",
+        {"dup_groups": dup, "weights": dup_weights,
+         "independent": sig9.get("independent_evidence"),
+         "total": sig9.get("total_deliveries"),
+         "timeline_violations": sorted(tl_types)}))
+
+    # 13) 对照：C-003 调拨双边守恒可解释；C-010 进货充足逐批守恒、独立签收
+    a3 = latest("C-003")
+    tr_checks = {t["transfer"]: t for t in
+                 a3.detail.get("conservation", {}).get("transfer_checks", [])} if a3 else {}
+    a10 = latest("C-010")
+    d10 = a10.detail if a10 else {}
+    sig10 = d10.get("signature_quality", {})
+    ok13 = (a3 and a3.overall_status == "explains"
+            and tr_checks.get("TR4", {}).get("qty_conserved") is True
+            and tr_checks.get("TR4", {}).get("timeline_ok") is True
+            and a10 and a10.overall_status == "explains"
+            and a10.explanation_capable is True
+            and d10.get("conservation", {}).get("uncovered_total", 1) == 0
+            and sig10.get("independent_evidence") == 1
+            and sig10.get("duplicate_photo_groups") == [])
+    checks.append(_chk(
+        "logistics_conserved_controls",
+        "C-003 调拨双边守恒、C-010 进货充足逐批守恒，均判定可由配送/调拨正常解释",
+        ok13,
+        "C-003 explains 且 TR4 守恒；C-010 explains、无未覆盖量、签收独立",
+        {"c003_status": a3.overall_status if a3 else None,
+         "tr4": tr_checks.get("TR4"),
+         "c010_status": a10.overall_status if a10 else None,
+         "c010_uncovered": d10.get("conservation", {}).get("uncovered_total"),
+         "c010_signature": {"independent": sig10.get("independent_evidence"),
+                            "dups": sig10.get("duplicate_photo_groups")}}))

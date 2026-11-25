@@ -101,17 +101,39 @@ def run_case_checks(db: Session, case: Case) -> dict:
     supplies = db.query(Supply).filter(Supply.settlement_code.in_(st_codes)).all() if st_codes else []
     sup_codes = [x.code for x in supplies]
     deliveries = db.query(Delivery).filter(Delivery.supply_code.in_(sup_codes)).all() if sup_codes else []
-    if deliveries and all(d.signature_match for d in deliveries):
-        checks.append(_add(
-            db, case.code, "signature", "配送签收", "checked_explains",
-            f"{len(deliveries)} 份配送签收的签名/身份核验均匹配参保人本人，"
-            "可解释养老机构电话/代办背景下药品确由本人收取。",
-            [_src_code(db, d.source_id) for d in deliveries], effect="downweight"))
-    elif deliveries:
-        checks.append(_add(
-            db, case.code, "signature", "配送签收", "not_excluded",
-            "存在签收记录但至少一份签名核验不匹配，代收真实性仍需人工核验。",
-            [_src_code(db, d.source_id) for d in deliveries]))
+    if deliveries:
+        # 与签收证据质量器同口径：重复照片不独立加分、签收早于出库属时序倒挂
+        hashes = [d.photo_hash for d in deliveries if d.photo_hash]
+        dup_photos = sorted({h for h in hashes if hashes.count(h) > 1})
+        sup_map = {s.code: s for s in supplies}
+        timeline_bad = [d.code for d in deliveries
+                        if d.supply_code in sup_map
+                        and d.signed_at.date() < sup_map[d.supply_code].supply_date]
+        mismatch = [d.code for d in deliveries if not d.signature_match]
+        if dup_photos or timeline_bad or mismatch:
+            reasons = []
+            if mismatch:
+                reasons.append(f"签名/身份核验不匹配：{mismatch}")
+            if dup_photos:
+                reasons.append(f"重复签收照片（不独立加分）：{dup_photos}")
+            if timeline_bad:
+                reasons.append(f"签收早于出库的时序倒挂：{timeline_bad}")
+            checks.append(_add(
+                db, case.code, "signature", "配送签收", "not_excluded",
+                "存在签收记录但签收链证据质量不足——" + "；".join(reasons)
+                + "。配送解释需结合“配送与库存守恒”页的批次/时序核对，不能仅凭签收单排除。",
+                [_src_code(db, d.source_id) for d in deliveries]))
+        elif all(d.signature_match for d in deliveries):
+            checks.append(_add(
+                db, case.code, "signature", "配送签收", "checked_explains",
+                f"{len(deliveries)} 份配送签收的签名/身份核验均匹配参保人本人、照片指纹独立且时序正常，"
+                "可解释养老机构电话/代办背景下药品确由本人收取。",
+                [_src_code(db, d.source_id) for d in deliveries], effect="downweight"))
+        else:
+            checks.append(_add(
+                db, case.code, "signature", "配送签收", "not_excluded",
+                "存在签收记录但至少一份签名核验不匹配，代收真实性仍需人工核验。",
+                [_src_code(db, d.source_id) for d in deliveries]))
     else:
         checks.append(_add(
             db, case.code, "signature", "配送签收", "no_record",

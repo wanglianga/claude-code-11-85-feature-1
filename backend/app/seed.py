@@ -307,11 +307,13 @@ def seed_p23(db):
     add_settle(db, "ST3", "JS-HD-0304-1102", "P2", "RX3", "PH4", D(2026, 3, 4),
                92.00, 78.20, 13.80)
     add_supply(db, "SUP3", "PH4", "ST3", "RX3-I1", "P2", "二甲双胍", "B-MET-260211", 60, D(2026, 3, 4))
-    ds = src(db, "SRC-DL1", "delivery", "DL1", "配送签收系统", "签收单 PS-8801",
-             dt(2026, 3, 5, 9), received=dt(2026, 3, 5, 18))
+    ds = src(db, "SRC-DL1", "delivery", "DL1", "配送签收系统", "签收单 PS-8801（含签收照片 IMG-8801.jpg）",
+             dt(2026, 3, 5, 9), received=dt(2026, 3, 5, 18),
+             payload={"photo": "IMG-8801.jpg", "sha256": "PHOTO-8801-A1"})
     db.add(Delivery(code="DL1", supply_code="SUP3", person_code="P2", receiver_name="王秀兰",
                     address="海淀区夕阳红路1号 A-1203", signed_at=dt(2026, 3, 5, 10, 22),
-                    signature_match=True, source_id=ds.id))
+                    signature_match=True, photo_hash="PHOTO-8801-A1",
+                    evidence_note="本人签收，现场照片含门牌与药品批号", source_id=ds.id))
 
     add_visit(db, "V3", "P3", "H2", "D2", d3, "高血压随访", "HIS-仁济")
     add_rx(db, "RX4", "CF-RJ-3355", "V3", "P3", "H2", "D2", d3, [
@@ -319,11 +321,12 @@ def seed_p23(db):
     add_settle(db, "ST4", "JS-HD-0305-1188", "P3", "RX4", "PH4", D(2026, 3, 5),
                76.00, 64.60, 11.40)
     add_supply(db, "SUP4", "PH4", "ST4", "RX4-I1", "P3", "格列美脲", "B-GLM-260130", 30, D(2026, 3, 5))
-    ds2 = src(db, "SRC-DL2", "delivery", "DL2", "配送签收系统", "签收单 PS-8830",
-              dt(2026, 3, 6, 9))
+    ds2 = src(db, "SRC-DL2", "delivery", "DL2", "配送签收系统", "签收单 PS-8830（含签收照片 IMG-8830.jpg）",
+              dt(2026, 3, 6, 9), payload={"photo": "IMG-8830.jpg", "sha256": "PHOTO-8830-B2"})
     db.add(Delivery(code="DL2", supply_code="SUP4", person_code="P3", receiver_name="王桂芳",
                     address="海淀区夕阳红路1号 A-1205", signed_at=dt(2026, 3, 6, 15, 40),
-                    signature_match=True, source_id=ds2.id))
+                    signature_match=True, photo_hash="PHOTO-8830-B2",
+                    evidence_note="本人签收，现场照片独立可核", source_id=ds2.id))
 
 
 def seed_p4(db):
@@ -469,6 +472,156 @@ def seed_referral(db):
                           service_type="住院床位", source_id=bs.id))
 
 
+def seed_logistics_delivery(db):
+    """C-009 配送解释反证剧本：用药品实物流/库存/签收链核对“集中购药能否由配送解释”。
+
+    - PH6 悦康大药房（海淀店）：同成分硝苯地平三笔集中取得，其中第三笔出库时
+      同批次在库不足（配送量超库存）→ 不能作正常解释，缺货反证入案件包。
+    - 第二笔台账缺口（无 sale_out 行）→ 只能走按日流量平衡给覆盖区间。
+    - 两张签收单复用同一照片指纹 → 重复照片不独立加分。
+    - 一笔签收早于出库（时序倒挂）。
+    - PH1 对照批次：进货充足、逐批守恒匹配、本人独立签收 → 可由配送正常解释。
+    """
+    db.add(Org(code="PH6", name="悦康大药房（海淀店）", org_type="pharmacy",
+               region="HD", level="定点药店"))
+    db.flush()
+    db.add(Person(code="P15", name="孙玉梅", pseudo_id="P15", region="HD",
+                  contact_phone="13900000015", address="海淀区学院南路5号院",
+                  gender="女", birth_year=1958,
+                  note="慢病高血压，社区集中配送购药"))
+    db.add(Person(code="P16", name="周建华", pseudo_id="P16", region="CY",
+                  contact_phone="13900000016", address="朝阳区和平街14号院",
+                  gender="男", birth_year=1962, note="对照样本：库存充足正常配送"))
+    db.flush()
+    ing = "硝苯地平"
+
+    # ---- PH6：进货仅 40 片，三笔出库 20+20+20=60（第二笔缺台账行），库存不足 ----
+    d0 = D(2026, 3, 9)
+    add_visit(db, "V15", "P15", "H2", "D2", d0, "高血压随访·社区集中配药", "HIS-仁济")
+    add_rx(db, "RX15", "CF-RJ-3901", "V15", "P15", "H2", "D2", d0, [
+        ("硝苯地平控释片", ing, "30mg*7片/盒", 20, 1, 20, d0, D(2026, 3, 28))])
+    # 批次 B-NIF-260301 进货 40
+    add_ledger(db, "INV-NIF-PUR", "PH6", ing, "B-NIF-260301", "purchase_in", 40,
+               "PO-NIF-2603", D(2026, 3, 8), counterpart="WH-总仓")
+    # 第一笔：20 片，台账齐全，可被 40 片覆盖
+    add_settle(db, "ST-N1", "JS-HD-0309-9001", "P15", "RX15", "PH6", d0,
+               96.00, 80.00, 16.00)
+    add_supply(db, "SUP-N1", "PH6", "ST-N1", "RX15-I1", "P15", ing,
+               "B-NIF-260301", 20, d0)
+    add_ledger(db, "INV-NIF-O1", "PH6", ing, "B-NIF-260301", "sale_out", -20,
+               "ST-N1", d0)
+    # 第二笔：20 片，但进销存台账缺 sale_out 行（台账缺口 → 日流量区间）
+    add_settle(db, "ST-N2", "JS-HD-0309-9002", "P15", "RX15", "PH6", d0,
+               96.00, 80.00, 16.00)
+    add_supply(db, "SUP-N2", "PH6", "ST-N2", "RX15-I1", "P15", ing,
+               "B-NIF-260301", 20, d0)
+    # 第三笔：20 片，台账齐全但使用无任何进货记录的批次 B-NIF-260302
+    # → 先入先出匹配后整笔无在库可覆盖（配送量超库存），账面同日出现负库存
+    add_settle(db, "ST-N3", "JS-HD-0310-9003", "P15", "RX15", "PH6",
+               D(2026, 3, 10), 96.00, 80.00, 16.00)
+    add_supply(db, "SUP-N3", "PH6", "ST-N3", "RX15-I1", "P15", ing,
+               "B-NIF-260302", 20, D(2026, 3, 10))
+    add_ledger(db, "INV-NIF-O3", "PH6", ing, "B-NIF-260302", "sale_out", -20,
+               "ST-N3", D(2026, 3, 10))
+    # 账面流水：B-NIF-260301 为 +40 / -20（第二笔缺台账行）；
+    # B-NIF-260302 无进货直接 -20 → 负库存（缺货反证）
+
+    # 签收单：DL-N1 与 DL-N2 复用同一照片指纹；DL-N3 签收早于出库（时序倒挂）
+    dn1 = src(db, "SRC-DL-N1", "delivery", "DL-N1", "配送签收系统",
+              "签收单 PS-9101（照片 IMG-DUP.jpg）", dt(2026, 3, 9, 14),
+              payload={"photo": "IMG-DUP.jpg", "sha256": "PHOTO-DUP-7777"})
+    db.add(Delivery(code="DL-N1", supply_code="SUP-N1", person_code="P15",
+                    receiver_name="孙玉梅", address="海淀区学院南路5号院 3-202",
+                    signed_at=dt(2026, 3, 9, 15, 10), signature_match=True,
+                    photo_hash="PHOTO-DUP-7777",
+                    evidence_note="签收照片与 DL-N2 为同一文件", source_id=dn1.id))
+    dn2 = src(db, "SRC-DL-N2", "delivery", "DL-N2", "配送签收系统",
+              "签收单 PS-9102（照片 IMG-DUP.jpg 重复上传）", dt(2026, 3, 9, 16),
+              payload={"photo": "IMG-DUP.jpg", "sha256": "PHOTO-DUP-7777"})
+    db.add(Delivery(code="DL-N2", supply_code="SUP-N2", person_code="P15",
+                    receiver_name="孙玉梅", address="海淀区学院南路5号院 3-202",
+                    signed_at=dt(2026, 3, 9, 16, 40), signature_match=True,
+                    photo_hash="PHOTO-DUP-7777",
+                    evidence_note="与 DL-N1 同照片，重复签收不独立加分", source_id=dn2.id))
+    dn3 = src(db, "SRC-DL-N3", "delivery", "DL-N3", "配送签收系统",
+              "签收单 PS-9110（照片 IMG-9110.jpg）", dt(2026, 3, 9, 18),
+              payload={"photo": "IMG-9110.jpg", "sha256": "PHOTO-9110-C3"})
+    db.add(Delivery(code="DL-N3", supply_code="SUP-N3", person_code="P15",
+                    receiver_name="孙玉梅", address="海淀区学院南路5号院 3-202",
+                    signed_at=dt(2026, 3, 9, 18, 5), signature_match=True,
+                    photo_hash="PHOTO-9110-C3",
+                    evidence_note="3月9日即签收，但对应供药出库日为3月10日，时序倒挂",
+                    source_id=dn3.id))
+
+    # ---- PH1 对照：进货 60 片，一笔出库 20，逐批守恒、独立签收，可正常解释 ----
+    d1 = D(2026, 3, 12)
+    add_visit(db, "V16", "P16", "H1", "D1", d1, "高血压随访", "HIS·康和")
+    add_rx(db, "RX16", "CF-20260312-1208", "V16", "P16", "H1", "D1", d1, [
+        ("硝苯地平控释片", ing, "30mg*7片/盒", 20, 1, 20, d1, D(2026, 3, 31))])
+    add_ledger(db, "INV-NIF-OK-PUR", "PH1", ing, "B-NIF-260305", "purchase_in", 60,
+               "PO-NIF-2611", D(2026, 3, 11), counterpart="WH-总仓")
+    add_settle(db, "ST-N4", "JS-CY-0312-9004", "P16", "RX16", "PH1", d1,
+               98.00, 82.00, 16.00)
+    add_supply(db, "SUP-N4", "PH1", "ST-N4", "RX16-I1", "P16", ing,
+               "B-NIF-260305", 20, d1)
+    add_ledger(db, "INV-NIF-OK-O", "PH1", ing, "B-NIF-260305", "sale_out", -20,
+               "ST-N4", d1)
+    dn4 = src(db, "SRC-DL-N4", "delivery", "DL-N4", "配送签收系统",
+              "签收单 PS-9201（照片 IMG-9201.jpg）", dt(2026, 3, 12, 17),
+              payload={"photo": "IMG-9201.jpg", "sha256": "PHOTO-9201-D4"})
+    db.add(Delivery(code="DL-N4", supply_code="SUP-N4", person_code="P16",
+                    receiver_name="周建华", address="朝阳区和平街14号院 2-501",
+                    signed_at=dt(2026, 3, 12, 17, 20), signature_match=True,
+                    photo_hash="PHOTO-9201-D4",
+                    evidence_note="本人签收，照片独立，时序正常", source_id=dn4.id))
+    db.flush()
+
+
+def seed_inventory_purchases(db):
+    """为既有案件补全进货入库台账，使正常案件的进销存可逐批守恒；
+
+    缺进货行会把“台账不完整”误判成“配送超库存”，因此正常批次均补足 purchase_in，
+    仅 C-009 的 B-NIF-260302 刻意无进货，用于缺货反证剧本。
+    """
+    rows = [
+        # 药店, 成分, 批次, 数量, 到货日, 采购单号
+        ("PH1", "氨氯地平", "B-AML-260208", 100, D(2026, 3, 8), "PO-AML-260208"),
+        ("PH2", "氨氯地平", "B-AML-260121", 100, D(2026, 3, 8), "PO-AML-260121"),
+        ("PH4", "二甲双胍", "B-MET-260211", 120, D(2026, 3, 2), "PO-MET-260211"),
+        ("PH4", "格列美脲", "B-GLM-260130", 90, D(2026, 3, 3), "PO-GLM-260130"),
+        ("PH1", "瑞舒伐他汀", "B-RSV-260220", 80, D(2026, 3, 4), "PO-RSV-260220"),
+        ("PH5", "瑞舒伐他汀", "B-RSV-260218", 80, D(2026, 3, 4), "PO-RSV-260218"),
+        ("PH4", "氨氯地平", "B-AML-26010", 60, D(2026, 1, 3), "PO-AML-26010"),
+        ("PH4", "氨氯地平", "B-AML-26011", 60, D(2026, 2, 3), "PO-AML-26011"),
+        ("PH4", "氨氯地平", "B-AML-26012", 60, D(2026, 3, 6), "PO-AML-26012"),
+        ("PH7", "艾司唑仑", "B-ESZ-26031", 40, D(2026, 3, 16), "PO-ESZ-26031"),
+        ("PH7", "艾司唑仑", "B-ESZ-26032", 40, D(2026, 3, 16), "PO-ESZ-26032"),
+        ("PH7", "艾司唑仑", "B-ESZ-26033", 40, D(2026, 3, 16), "PO-ESZ-26033"),
+        # C-003：PH4 调出前须有足额进货，否则调拨出库会形成负库存
+        ("PH4", "阿托伐他汀", "B-AT-0210", 80, D(2026, 3, 10), "PO-AT-0210"),
+        # 集中结算：人血白蛋白每批次进货 4，出库 2
+        ("PH5", "人血白蛋白", "B-ALB-26030", 4, D(2026, 3, 20), "PO-ALB-26030"),
+        ("PH5", "人血白蛋白", "B-ALB-26031", 4, D(2026, 3, 20), "PO-ALB-26031"),
+        ("PH5", "人血白蛋白", "B-ALB-26032", 4, D(2026, 3, 20), "PO-ALB-26032"),
+        ("PH5", "人血白蛋白", "B-ALB-26033", 4, D(2026, 3, 20), "PO-ALB-26033"),
+    ]
+    for i, (ph, ing, batch, qty, day, ref) in enumerate(rows, 1):
+        add_ledger(db, f"INV-PUR-{i:02d}", ph, ing, batch, "purchase_in", qty,
+                   ref, day, counterpart="WH-总仓")
+    # 集中结算原本只有供药单没有台账出库行，补齐 sale_out 使账实一致
+    for i in range(4):
+        add_ledger(db, f"INV-ALB-O{i}", "PH5", "人血白蛋白", f"B-ALB-2603{i}",
+                   "sale_out", -2, f"ST-C{i}", D(2026, 3, 21))
+    # PH4 既有供药（P2/P3 签收、P6 慢病续方）补销售出库台账，使签收案件可逐批守恒
+    add_ledger(db, "INV-MET-O", "PH4", "二甲双胍", "B-MET-260211", "sale_out", -60,
+               "ST3", D(2026, 3, 4))
+    add_ledger(db, "INV-GLM-O", "PH4", "格列美脲", "B-GLM-260130", "sale_out", -30,
+               "ST4", D(2026, 3, 5))
+    for idx, d0 in enumerate([D(2026, 1, 5), D(2026, 2, 5), D(2026, 3, 8)]):
+        add_ledger(db, f"INV-AML-O{idx}", "PH4", "氨氯地平", f"B-AML-2601{idx}",
+                   "sale_out", -30, f"ST{8+idx}", d0)
+
+
 def seed_pattern_configs(db):
     cfgs = [
         PatternConfig(
@@ -574,6 +727,19 @@ CASE_META = [
                   "rx_codes": ["RX8", "RX9", "RX10"],
                   "settlement_codes": ["ST8", "ST9", "ST10"],
                   "ingredient": "氨氯地平", "filing": "BA-110108-2025-0098"}),
+    dict(code="C-009", title="P15 社区集中配送购药：库存守恒核对（配送能否解释）",
+         pattern_codes=["MULTI_POINT"], primary="P15", region="HD",
+         orgs=["PH6", "H2"], status="reviewing",
+         anchors={"person_codes": ["P15"], "rx_codes": ["RX15"],
+                  "settlement_codes": ["ST-N1", "ST-N2", "ST-N3"],
+                  "pharmacies": ["PH6"], "ingredient": "硝苯地平",
+                  "logistics_focus": True}),
+    dict(code="C-010", title="P16 正常配送对照：库存充足、签收独立（可由配送解释）",
+         pattern_codes=["MULTI_POINT"], primary="P16", region="CY",
+         orgs=["PH1", "H1"], status="excluded_legitimate",
+         anchors={"person_codes": ["P16"], "rx_codes": ["RX16"],
+                  "settlement_codes": ["ST-N4"], "pharmacies": ["PH1"],
+                  "ingredient": "硝苯地平", "logistics_focus": True}),
 ]
 
 
@@ -600,6 +766,8 @@ def run_seed(reset: bool = True):
         seed_p9_split(db)
         seed_central(db)
         seed_referral(db)
+        seed_inventory_purchases(db)
+        seed_logistics_delivery(db)
         seed_pattern_configs(db)
         db.commit()
 
@@ -670,10 +838,23 @@ def run_seed(reset: bool = True):
             case.current_judgment_id = j.id
             case.first_snapshot_id = snap.id
         db.commit()
+
+        # 9) 配送/库存守恒分析（五件套）：仅对存在物流材料的案件持久化
+        from .services import logistics as lg
+        lg_rows = 0
+        lg_findings = 0
+        for case in cases:
+            r = lg.build_case_logistics(db, case, persist=True, user="system")
+            if r.get("version"):
+                lg_rows += 1
+                lg_findings += r.get("open_findings", 0)
+        db.commit()
+
         print(f"[seed] OK: {db.query(Person).count()} persons, "
               f"{db.query(SourceRecord).count()} source records, "
               f"{db.query(GraphNode).count()} nodes, {db.query(GraphEdge).count()} edges, "
-              f"snapshot #{snap.snapshot_no}, model_run #{model_run.id}")
+              f"snapshot #{snap.snapshot_no}, model_run #{model_run.id}, "
+              f"logistics analyses {lg_rows} (open findings {lg_findings})")
     finally:
         db.close()
 

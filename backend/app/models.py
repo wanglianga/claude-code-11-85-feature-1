@@ -249,6 +249,9 @@ class Delivery(Base):
     address: Mapped[str] = mapped_column(String(256))
     signed_at: Mapped[datetime] = mapped_column(DateTime)
     signature_match: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 签收照片指纹（同哈希=同一张照片重复上传，不得独立加分）与证据备注
+    photo_hash: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    evidence_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("source_record.id"))
 
 
@@ -519,3 +522,54 @@ class ModelRun(Base):
     weights: Mapped[dict] = mapped_column(JSONB, default=dict)
     calibration: Mapped[dict] = mapped_column(JSONB, default=dict)
     note: Mapped[str] = mapped_column(Text)
+
+
+# ---------------------------------------------------------------- 物流守恒分析（配送解释核对）
+class LogisticsAnalysis(Base):
+    """一次“配送能否解释集中购药”的物流守恒分析结果（可重算、版本化）。
+
+    围绕案件锚定的成分/药店，比较进货、库存、出库、处方、配送单与签收时间：
+    逐批守恒匹配（证据强、依赖台账质量）与按日库存流量平衡（覆盖广、只能给区间）。
+    配送量超库存时结论为 cannot_explain，不能作正常解释；缺货反证只进案件包，不自动定性。
+    """
+    __tablename__ = "logistics_analysis"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_code: Mapped[str] = mapped_column(String(32), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    method_profile: Mapped[str] = mapped_column(String(16))  # batch / daily_hybrid
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_by: Mapped[str] = mapped_column(String(64), default="system")
+    overall_status: Mapped[str] = mapped_column(String(20))  # explains / partial / cannot_explain
+    explanation_capable: Mapped[bool] = mapped_column(Boolean, default=False)
+    demand_qty: Mapped[float] = mapped_column(Float, default=0)       # 被解释交易需求量
+    covered_qty: Mapped[float] = mapped_column(Float, default=0)      # 可被库存/批次覆盖量
+    uncovered_qty: Mapped[float] = mapped_column(Float, default=0)
+    shortage_qty: Mapped[float] = mapped_column(Float, default=0)     # 缺货/负库存累计
+    ledger_gap_count: Mapped[int] = mapped_column(Integer, default=0)  # 台账缺口条数
+    timeline_violations: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_photo_groups: Mapped[int] = mapped_column(Integer, default=0)
+    # 完整分析结构：批次账、守恒匹配、日流量平衡、时序对齐、签收质量、缺货反证
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    __table_args__ = (UniqueConstraint("case_code", "version",
+                                       name="uq_logistics_case_version"),)
+
+
+class LogisticsFinding(Base):
+    """缺货反证案件包条目：只汇集证据并走人工裁定，不自动改变案件定性。"""
+    __tablename__ = "logistics_finding"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_code: Mapped[str] = mapped_column(String(32), index=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True)  # LF-...
+    found_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    severity: Mapped[str] = mapped_column(String(16), default="warning")  # warning/critical
+    title: Mapped[str] = mapped_column(String(256))
+    detail: Mapped[str] = mapped_column(Text)
+    ingredient: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pharmacy_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    shortage_qty: Mapped[float] = mapped_column(Float, default=0)
+    source_codes: Mapped[list] = mapped_column(JSONB, default=list)
+    # open（待人工核验）/ accepted（纳入疑点）/ dismissed（材料补正后排除）
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)

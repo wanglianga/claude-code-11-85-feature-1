@@ -178,6 +178,11 @@
         </div>
       </el-tab-pane>
 
+      <!-- 配送与库存守恒 -->
+      <el-tab-pane label="配送 / 库存守恒" name="logistics">
+        <LogisticsPanel :case-code="detail.case.code" />
+      </el-tab-pane>
+
       <!-- 版本与核查轨迹 -->
       <el-tab-pane label="判断版本 / 核查轨迹" name="versions">
         <div class="card">
@@ -218,6 +223,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '../api.js'
 import GraphCanvas from '../components/GraphCanvas.vue'
+import LogisticsPanel from '../components/LogisticsPanel.vue'
 import { EDGE_META, STATUS_TYPE, yuan } from '../store.js'
 import { ElMessage } from 'element-plus'
 
